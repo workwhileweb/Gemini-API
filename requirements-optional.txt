@@ -1,0 +1,7 @@
+# Optional dependencies for gemini-webapi
+# These are not required but provide additional functionality
+
+# Browser cookie support - automatically load cookies from local browser
+# Supported platforms and browsers: https://github.com/borisbabic/browser_cookie3
+browser-cookie3>=0.19.1
+

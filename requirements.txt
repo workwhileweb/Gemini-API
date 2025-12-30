@@ -1,0 +1,19 @@
+# Core dependencies for gemini-webapi
+# Python 3.10+ required
+
+# HTTP client for async requests
+httpx>=0.28.1,<0.29.0
+
+# Logging framework
+loguru>=0.7.3,<0.8.0
+
+# Fast JSON parser
+orjson>=3.11.1,<3.12.0
+
+# Data validation and serialization
+pydantic>=2.12.2,<2.13.0
+
+# Optional: Browser cookie support
+# Uncomment the line below to enable automatic cookie loading from browser
+browser-cookie3>=0.19.1
+

@@ -1,2 +1,3 @@
 phân tích, diễn đạt, mô tả, hệ thống hóa toàn bộ repo này
 
+use my edited local package replace for browser-cookie3 at D:\github\browser_cookie3 with support multi chrome profiles support , then edit code in this repo to support multi profiles cookie if found cookie for gemini, and each requet to gemeni will swap to next cookie
