@@ -14,6 +14,9 @@ orjson>=3.11.1,<3.12.0
 pydantic>=2.12.2,<2.13.0
 
 # Optional: Browser cookie support
-# Uncomment the line below to enable automatic cookie loading from browser
-browser-cookie3>=0.19.1
+# Note: This repo uses a local browser_cookie3 package at D:\github\browser_cookie3
+# with multi-chrome profile support. The package will automatically use the local
+# version if available, otherwise fallback to the pip package.
+# Uncomment the line below if you want to install the pip package as fallback:
+# browser-cookie3>=0.19.1
 

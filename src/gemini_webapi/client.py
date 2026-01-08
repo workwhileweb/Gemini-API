@@ -79,6 +79,8 @@ class GeminiClient(GemMixin):
         "refresh_interval",
         "_gems",  # From GemMixin
         "kwargs",
+        "_cookie_sets",  # List of (access_token, cookies, source) tuples
+        "_cookie_index",  # Current index for round-robin rotation
     ]
 
     def __init__(
@@ -106,6 +108,10 @@ class GeminiClient(GemMixin):
             self.cookies["__Secure-1PSID"] = secure_1psid
             if secure_1psidts:
                 self.cookies["__Secure-1PSIDTS"] = secure_1psidts
+        
+        # Multi-profile cookie rotation support
+        self._cookie_sets: list[tuple[str, dict, str]] = []  # (access_token, cookies, source)
+        self._cookie_index: int = 0
 
     async def init(
         self,
@@ -137,20 +143,54 @@ class GeminiClient(GemMixin):
         """
 
         try:
-            access_token, valid_cookies = await get_access_token(
-                base_cookies=self.cookies, proxy=self.proxy, verbose=verbose
+            # Collect all valid cookie sets from multiple profiles
+            cookie_sets_result = await get_access_token(
+                base_cookies=self.cookies, proxy=self.proxy, verbose=verbose, collect_all=True
             )
+            
+            if isinstance(cookie_sets_result, list) and len(cookie_sets_result) > 0:
+                # Multiple cookie sets found
+                self._cookie_sets = cookie_sets_result
+                self._cookie_index = 0
+                
+                if verbose:
+                    logger.info(f"Found {len(self._cookie_sets)} valid cookie set(s) from multiple profiles")
+                    for i, (_, _, source) in enumerate(self._cookie_sets):
+                        logger.debug(f"  Cookie set {i+1}: {source}")
+                
+                # Use first cookie set for initial client setup
+                access_token, valid_cookies, source = self._cookie_sets[0]
+            else:
+                # Fallback: try to get single cookie set
+                try:
+                    single_result = await get_access_token(
+                        base_cookies=self.cookies, proxy=self.proxy, verbose=verbose, collect_all=False
+                    )
+                    if isinstance(single_result, tuple) and len(single_result) == 2:
+                        access_token, valid_cookies = single_result
+                        self._cookie_sets = [(access_token, valid_cookies, "single")]
+                        self._cookie_index = 0
+                    else:
+                        raise AuthError("Failed to get valid cookie set")
+                except Exception:
+                    # If single cookie set also fails, use empty list
+                    self._cookie_sets = []
+                    self._cookie_index = 0
+                    raise AuthError("No valid cookies available for initialization")
 
+            # Initialize with first cookie set
+            current_access_token, current_cookies, _ = self._cookie_sets[self._cookie_index]
+            
             self.client = AsyncClient(
                 timeout=timeout,
                 proxy=self.proxy,
                 follow_redirects=True,
                 headers=Headers.GEMINI.value,
-                cookies=valid_cookies,
+                cookies=current_cookies,
                 **self.kwargs,
             )
-            self.access_token = access_token
-            self.cookies = valid_cookies
+            self.access_token = current_access_token
+            self.cookies = current_cookies
             self._running = True
 
             self.timeout = timeout
@@ -161,15 +201,19 @@ class GeminiClient(GemMixin):
 
             self.auto_refresh = auto_refresh
             self.refresh_interval = refresh_interval
-            if task := rotate_tasks.get(self.cookies["__Secure-1PSID"]):
-                task.cancel()
-            if self.auto_refresh:
-                rotate_tasks[self.cookies["__Secure-1PSID"]] = asyncio.create_task(
-                    self.start_auto_refresh()
-                )
+            if self.cookies.get("__Secure-1PSID"):
+                if task := rotate_tasks.get(self.cookies["__Secure-1PSID"]):
+                    task.cancel()
+            if self.auto_refresh and len(self._cookie_sets) > 0:
+                # Start auto-refresh for all cookie sets
+                for access_token, cookies, source in self._cookie_sets:
+                    if cookies.get("__Secure-1PSID"):
+                        rotate_tasks[cookies["__Secure-1PSID"]] = asyncio.create_task(
+                            self.start_auto_refresh()
+                        )
 
             if verbose:
-                logger.success("Gemini client initialized successfully.")
+                logger.success(f"Gemini client initialized successfully with {len(self._cookie_sets)} cookie set(s).")
         except Exception:
             await self.close()
             raise
@@ -206,6 +250,33 @@ class GeminiClient(GemMixin):
             self.close_task = None
 
         self.close_task = asyncio.create_task(self.close(self.close_delay))
+
+    def _get_next_cookie_set(self) -> tuple[str, dict]:
+        """
+        Get the next cookie set in round-robin fashion.
+        
+        Returns
+        -------
+        tuple[str, dict]
+            (access_token, cookies) for the next cookie set
+        """
+        if not self._cookie_sets:
+            # Fallback to current cookies if no sets available
+            return self.access_token or "", self.cookies
+        
+        # Round-robin: move to next index
+        self._cookie_index = (self._cookie_index + 1) % len(self._cookie_sets)
+        access_token, cookies, source = self._cookie_sets[self._cookie_index]
+        
+        # Update client cookies and access token
+        self.access_token = access_token
+        self.cookies = cookies
+        if self.client:
+            self.client.cookies.update(cookies)
+        
+        logger.debug(f"Switched to cookie set {self._cookie_index + 1}/{len(self._cookie_sets)} from {source}")
+        
+        return access_token, cookies
 
     async def start_auto_refresh(self) -> None:
         """
@@ -305,12 +376,15 @@ class GeminiClient(GemMixin):
         if self.auto_close:
             await self.reset_close_task()
 
+        # Get next cookie set for round-robin rotation
+        access_token, cookies = self._get_next_cookie_set()
+
         try:
             response = await self.client.post(
                 Endpoint.GENERATE.value,
                 headers=model.model_header,
                 data={
-                    "at": self.access_token,
+                    "at": access_token,
                     "f.req": json.dumps(
                         [
                             None,
@@ -581,11 +655,14 @@ class GeminiClient(GemMixin):
             Response object containing the result of the batch execution.
         """
 
+        # Get next cookie set for round-robin rotation
+        access_token, cookies = self._get_next_cookie_set()
+
         try:
             response = await self.client.post(
                 Endpoint.BATCH_EXEC,
                 data={
-                    "at": self.access_token,
+                    "at": access_token,
                     "f.req": json.dumps(
                         [[payload.serialize() for payload in payloads]]
                     ).decode(),
